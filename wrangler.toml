@@ -1,13 +1,27 @@
+# OpenMic Gun relay on Cloudflare
+# https://github.com/hectorchanht/openmic-relay
+
 name = "openmic-relay"
-main = "worker.js"
+main = "src/index.js"
 compatibility_date = "2026-10-01"
 
+# No build step: wrangler bundles src/index.js (+ the gun core) automatically.
+# No nodejs_compat: we import gun's core browser build ("gun/gun"), which
+# has zero node builtins.
 
-# NOTE: this repo ships worker.js as SOURCE. `npm run build` produces
-# dist/worker.js (bundled + minified) for dashboard upload. If you deploy
-# via `wrangler deploy`, point main at dist/worker.js or add a build step.
-[durable_objects]
-bindings=[{ name ="RELAY", class_name ="RelayRoom"}]
+[[durable_objects.bindings]]
+name = "GUN_RELAY"
+class_name = "GunRelay"
+
 [[migrations]]
-tag="v1"
-new_sqlite_classes=["RelayRoom"]
+tag = "v1"
+new_sqlite_classes = ["GunRelay"]
+
+[vars]
+# Existing Gun relays to sync from on first contact (old-data carryover).
+# Comma-separated. Clear this after migration to let the DO sleep when idle.
+GUN_PEERS = "https://rushgun-relay-production.up.railway.app/gun"
+# One-time import: GET <url> must return { soul: node, ... } (the old
+# relay's /export). Imported once per URL on first boot, then journaled.
+# Clear after migration.
+GUN_IMPORT_URL = "https://rushgun-relay-production.up.railway.app/export"

@@ -1,80 +1,126 @@
 # openmic-relay
 
 Cloudflare Worker + Durable Object Gun relay for [OpenMic](https://github.com/hectorchanht/openmic)
-(live anonymous Q&A for events). Replaces the old Railway relay.
+(live anonymous Q&A for events). Replaces the old Railway relay
+(`rushgun-relay-production.up.railway.app`), whose container filesystem was
+ephemeral — history was lost on every restart.
 
 ## Architecture
 
 ```
-browser --ws--> /gun --Upgrade--> Worker --fetch--> RelayRoom (Durable Object)
-                                              |
-                                    one Gun mesh (opt.mesh)
-                                    shared by all peers
+browser --wss--> /gun --Upgrade--> Worker --fetch--> GunRelay (Durable Object, id "gun")
+                                                              |
+                                              one REAL Gun instance + DAM mesh,
+                                              shared by every connected peer
 ```
 
-A plain Worker can't host a Gun relay: every request runs in its own isolate,
-so peers would never see each other. The Durable Object gives us **one**
-long-lived isolate holding **one** Gun mesh; the entry Worker just forwards
-`/gun` websocket upgrades to the single `RELAY` instance (`idFromName('global')`).
+A plain Worker can't host a Gun relay: every request runs in its own
+isolate, so peers would never see each other. The Durable Object gives us
+**one** long-lived isolate holding **one** Gun instance; the entry Worker
+just forwards `/gun` websocket upgrades to the singleton `GunRelay`.
 
 ## How the mesh bridge works
 
-Gun's DAM mesh (`opt.mesh`, built by gun's own websocket module) only needs a
-*peer* shaped like `{ wire: { send(raw), close() } }`:
+No hand-rolled wire protocol. We run Gun's own code:
 
-| event | what we do |
-|---|---|
-| WS open | `peer = { wire: { send: r => server.send(r), close: () => server.close() } }`, then `mesh.hi(peer)` |
-| WS message | `mesh.hear(event.data, peer)` |
-| WS close/error | `mesh.bye(peer)` |
+- `import Gun from 'gun/gun'` — the core browser build, **not** the package
+  main (`lib/server.js`), which drags in node-only modules (UDP multicast,
+  `ws` server, rfs/radisk). The core has the full graph + DAM mesh with
+  zero node builtins, so it bundles cleanly with no `nodejs_compat`.
+- `Gun.on('opt', root => root.opt.mesh = root.opt.mesh || Gun.Mesh(root))`
+  creates the real mesh, exactly like Gun's own `lib/wire.js` transport.
+- Each client socket becomes a mesh peer: `mesh.hi(peer)` on open,
+  `mesh.hear(raw, peer)` on message, `mesh.bye(peer)` on close/error, with
+  `peer.wire.send = raw => ws.send(raw)`. Gun's mesh dedups by message id,
+  so broadcast fan-out is safe.
+- `Gun({ WebSocket: false, localStorage: false, file: false })` — no
+  built-in transports, no disk (Workers have no filesystem).
 
-Critical ordering detail (from gun@0.2020.1241 source, `mesh.hi`): if
-`peer.wire` is missing when `hi` fires, the mesh assumes an **outbound**
-client peer and tries to open its own socket to it. So `peer.wire` is set
-**before** `mesh.hi(peer)`.
-
-We import the core browser build (`gun/gun`), not the package main
-(`lib/server.js`), which drags in node-only modules (rfs/radisk, ws server).
-The core has the full mesh with zero node builtins, so it bundles cleanly
-for Workers.
+(Quirk documented in `src/relay.js`: gun.js's UMD wrapper throws
+`ReferenceError: Gun is not defined` if loaded via `const Gun =
+require(...)` — keep the ESM import.)
 
 ## Durability
 
-`Gun({ file: false })` — Workers have no filesystem, so the graph is
-in-memory only. Realtime relaying works; history does **not** survive a
-Durable Object eviction/restart. (Same profile as the old Railway relay,
-whose container fs was ephemeral anyway.)
+The in-memory graph is journaled to Durable Object storage:
 
-## Build
+- Every 5s (alarm, while sockets are connected) + on socket close, changed
+  souls are written per-key (`soul:<soul>`) — OpenMic data is tiny text.
+- On (re)construction, the journal is replayed **through the mesh** as
+  wire-format graph fragments (`{ '#': id, put: { soul: { _: {#, >}, … } }
+  }`), preserving the original HAM state timestamps.
+- When idle (no sockets, no outbound peers), the DO is allowed to sleep —
+  no duration billing while hibernating.
+
+## Old-data carryover
+
+Gun's mesh sync is **pull-based**: dialing a peer does *not* push its
+existing graph to us — a fresh relay would start empty. Carryover is two
+parts:
+
+1. **`GUN_PEERS`** (comma-separated, `wrangler.toml` `[vars]`) — the DO
+   dials each listed relay with a Workers `WebSocket` and bridges it into
+   the mesh, so *live* writes keep flowing between old and new during the
+   transition.
+2. **`GUN_IMPORT_URL`** — one-time import. The old relay exposes
+   `GET /export` → `{ soul: node, ... }` (added to
+   [rushgun-relay](https://github.com/hectorchanht/rushgun-relay)); on
+   first boot the DO fetches it and replays every soul through the mesh
+   (HAM state timestamps preserved), then journals it like any other data.
+   Imported once per URL (tracked in storage).
+
+**After migration, clear both vars** so the DO can sleep when idle.
+
+## Local dev & tests
 
 ```bash
 npm install
-npm run build   # esbuild -> dist/worker.js (bundled, minified ESM)
+npm run dev      # wrangler dev --local  (no Cloudflare login needed)
+npm test         # real-Gun client test: two node clients through the relay
 ```
 
-## Deploy
+`npm test` spins up `wrangler dev` locally, then:
+1. client A puts a post + a vote through `ws://localhost:8787/gun`,
+2. client B (separate process) reads them back — proves relay fan-out,
+3. kills wrangler, restarts it, and confirms the data survived (DO storage
+   persisted in `.wrangler/state`) — proves the journal + replay.
 
-Two options:
+## Deploy (dashboard, git integration)
 
-**A. Wrangler CLI**
-```bash
-npx wrangler deploy --config wrangler.toml
-# (point main at dist/worker.js first, or add [build] command = "npm run build")
-```
+Cloudflare API tokens don't work from some environments — this repo is
+deployed via the dashboard instead:
 
-**B. Cloudflare dashboard** (no CLI)
-1. Workers & Pages → Create Worker → upload `dist/worker.js`
-   (or connect this repo via Workers Builds with build command `npm run build`)
-2. Worker → Settings → Bindings → Add Durable Object binding:
-   name `RELAY` → class `RelayRoom`
-3. The `[[migrations]]` in wrangler.toml registers the class on first
-   `wrangler deploy`; for dashboard deploys, creating the binding is enough.
+1. Workers & Pages → Create → Connect to Git → `hectorchanht/openmic-relay`
+   @ `main`. **Build command: empty. Deploy command: `npx wrangler deploy`.**
+2. Settings → Bindings → Durable Objects: the `[[durable_objects.bindings]]`
+   + `[[migrations]]` in `wrangler.toml` already declare binding
+   `GUN_RELAY` → class `GunRelay` (tag `v1`, `new_sqlite_classes`).
+   Verify the class appears under Durable Objects after the first deploy.
+3. Settings → Variables: `GUN_PEERS` / `GUN_IMPORT_URL` are pre-set in
+   `wrangler.toml` to the old Railway relay for carryover — clear both
+   after migration (and make sure the Railway service redeployed with the
+   `/export` endpoint first).
+4. The Worker will be live at
+   `https://openmic-relay.<account>.workers.dev`, serving the Gun protocol
+   at `https://openmic-relay.<account>.workers.dev/gun`.
+5. Flip the app: Vercel project `openmic` → env
+   `NEXT_PUBLIC_GUN_PEERS=https://openmic-relay.<account>.workers.dev/gun`
+   → redeploy. Then retire the Railway service.
 
-## Verify
+## Cost
 
-- `GET https://<worker>/` → `openmic relay is alive`
-- `GET https://<worker>/gun` with `Upgrade: websocket` → `101 Switching Protocols`
-- Point the app at it: `NEXT_PUBLIC_GUN_PEERS=https://<worker>/gun`
+On the existing Workers Paid plan ($5/mo): Workers requests (10M/mo
+included), Durable Object requests (1M/mo included, websocket messages
+billed 20:1), DO duration (400k GB-s/mo included — a single idle-ish DO is
+~340k GB-s/mo even if kept awake 24/7), DO storage (5 GB-month included;
+OpenMic's graph is kilobytes). **Effectively $0 on top of the $5 plan**,
+and the Railway cost (~$5/mo after trial) goes away.
+
+## Endpoints
+
+- `GET /` or `GET /gun` → `openmic gun relay is alive`
+- `GET /healthz` → `{ ok, souls, peers, journaled, ts }` from the live DO
+- `WS /gun` → Gun protocol (this is what the app uses)
 
 ## License
 

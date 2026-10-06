@@ -1,1 +1,19 @@
-{"dependencies":{"gun":"^0.2020.1241"},"description":"Cloudflare Worker + Durable Object Gun relay for OpenMic","devDependencies":{"esbuild":"^0.24.0"},"name":"openmic-relay","private":true,"scripts":{"build":"esbuild worker.js --bundle --format=esm --platform=browser --target=es2022 --minify --outfile=dist/worker.js"},"type":"module","version":"1.0.0"}
+{
+  "dependencies": {
+    "gun": "^0.2020.1241"
+  },
+  "description": "Cloudflare Worker + Durable Object Gun relay for OpenMic",
+  "devDependencies": {},
+  "name": "openmic-relay",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev --local",
+    "deploy": "wrangler deploy",
+    "test": "node test/relay.test.cjs"
+  },
+  "type": "module",
+  "version": "1.0.0",
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}

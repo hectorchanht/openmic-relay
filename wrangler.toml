@@ -10,4 +10,4 @@ compatibility_date = "2026-10-01"
 bindings=[{ name ="RELAY", class_name ="RelayRoom"}]
 [[migrations]]
 tag="v1"
-new_classes=["RelayRoom"]
+new_sqlite_classes=["RelayRoom"]

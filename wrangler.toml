@@ -2,13 +2,12 @@ name = "openmic-relay"
 main = "worker.js"
 compatibility_date = "2026-10-01"
 
+
 # NOTE: this repo ships worker.js as SOURCE. `npm run build` produces
 # dist/worker.js (bundled + minified) for dashboard upload. If you deploy
 # via `wrangler deploy`, point main at dist/worker.js or add a build step.
-
-[[durable_objects]]
-bindings = [{ name = "RELAY", class_name = "RelayRoom" }]
-
+[durable_objects]
+bindings=[{ name ="RELAY", class_name ="RelayRoom"}]
 [[migrations]]
-tag = "v1"
-new_classes = ["RelayRoom"]
+tag="v1"
+new_classes=["RelayRoom"]

@@ -14,7 +14,7 @@ name = "GUN_RELAY"
 class_name = "GunRelay"
 
 [[migrations]]
-tag = "v1"
+tag = "v2"
 new_sqlite_classes = ["GunRelay"]
 
 [vars]

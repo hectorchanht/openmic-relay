@@ -27,14 +27,23 @@ export class RelayRoom {
     // persistence is unavailable. Same durability profile as the old
     // Railway relay (ephemeral container fs) — realtime relaying works,
     // history does not survive a DO eviction/restart.
-    const gun = Gun({ file: false });
+    //
+    // Workers have no `window`, so gun's websocket module would early-return
+    // without building opt.mesh (it looks for a WebSocket constructor on
+    // Gun.window, which is only set when a global window exists). A dummy
+    // WebSocket class satisfies its truthiness gate so the mesh is created;
+    // we manage all peers manually via mesh.hi/hear/bye and never open
+    // outbound sockets, so the dummy is never instantiated.
+    class DummyWebSocket {}
+    const gun = Gun({ file: false, WebSocket: DummyWebSocket });
     this.gun = gun;
 
     // gun's websocket module builds opt.mesh on the root instance.
     const root = (gun.back && gun.back(-1)) || gun;
-    this.mesh =
-      (root._ && root._.opt && root._.opt.mesh) ||
-      (gun._ && gun._.opt && gun._.opt.mesh);
+    this.mesh = root._ && root._.opt && root._.opt.mesh;
+    if (!this.mesh && typeof Gun.Mesh === 'function') {
+      this.mesh = root._.opt.mesh = Gun.Mesh(root);
+    }
     if (!this.mesh) {
       throw new Error('Gun mesh not available — relay cannot start');
     }
